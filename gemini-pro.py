@@ -193,7 +193,7 @@ def refine_prompt_text(instruction_type):
             refinement_query = f"{modifier}\n\nOriginal Prompt:\n{st.session_state.current_prompt}"
             
             try:
-                model = genai.GenerativeModel("gemini-pro")
+                model = genai.GenerativeModel("gemini-1.5-flash-latest")
                 response = model.generate_content(refinement_query)
                 st.session_state.current_prompt = response.text.strip()
                 if st.session_state.current_prompt_id:
@@ -350,7 +350,7 @@ if generate_btn:
             try:
                 full_prompt = f"{SYSTEM_PROMPT}\n\nUser Request:\n{user_problem}"
                 
-                model = genai.GenerativeModel("gemini-pro")
+                model = genai.GenerativeModel("gemini-1.5-flash-latest")
                 response = model.generate_content(
                     full_prompt,
                     generation_config={"temperature": creativity_level}
