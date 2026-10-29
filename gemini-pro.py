@@ -8,29 +8,6 @@ import json
 # --- Streamlit UI Setup ---
 st.set_page_config(page_title="Best Prompt Generator", page_icon="🚀", layout="wide")
 
-# --- Helper: Dynamic Working Model Selector ---
-def get_active_model():
-    """Automatically selects the best available generative model for the API key."""
-    try:
-        available_models = [
-            m.name for m in genai.list_models() 
-            if "generateContent" in m.supported_generation_methods
-        ]
-        # 1. Prioritize gemini-3.8-flash
-        for name in available_models:
-            if "3.8-flash" in name:
-                return genai.GenerativeModel(name)
-        # 2. Pick any other active flash model (ignoring deprecated 2.5)
-        for name in available_models:
-            if "flash" in name.lower() and "2.5" not in name:
-                return genai.GenerativeModel(name)
-        # 3. Fallback to any supported model in list
-        if available_models:
-            return genai.GenerativeModel(available_models[0])
-    except Exception:
-        pass
-    return genai.GenerativeModel("models/gemini-3.8-flash")
-
 # --- Database Setup (SQLite Integration) ---
 @st.cache_resource
 def init_db():
@@ -60,6 +37,34 @@ def init_db():
 
 conn = init_db()
 
+# --- Helper: Dynamic Working Model Selector ---
+def get_active_model():
+    """Automatically selects the best available generative model for the API key."""
+    try:
+        available_models = [
+            m.name for m in genai.list_models() 
+            if "generateContent" in m.supported_generation_methods
+        ]
+        
+        # Priority order for models
+        candidate_names = [
+            "gemini-1.5-flash-latest",
+            "gemini-1.5-flash",
+            "gemini-2.0-flash",
+            "gemini-1.5-pro-latest"
+        ]
+        
+        for candidate in candidate_names:
+            for m_name in available_models:
+                if candidate in m_name or m_name.endswith(candidate):
+                    return genai.GenerativeModel(m_name)
+                    
+        if available_models:
+            return genai.GenerativeModel(available_models[0])
+    except Exception:
+        pass
+    return genai.GenerativeModel("gemini-1.5-flash-latest")
+
 # --- Session States ---
 if "user_text" not in st.session_state:
     st.session_state.user_text = ""
@@ -71,28 +76,29 @@ if "current_prompt_id" not in st.session_state:
 def set_template(text):
     st.session_state.user_text = text
 
-# --- Sidebar: API Key Configuration ---
-with st.sidebar:
-    st.markdown("### 🔑 API Configuration")
-    
-    default_key = ""
-    try:
-        if "GEMINI_API_KEY" in st.secrets:
-            default_key = st.secrets["GEMINI_API_KEY"]
-    except Exception:
-        pass
+# --- Secure API Configuration (No Key Exposure) ---
+api_key_configured = False
 
-    user_api_key = st.text_input(
-        "Gemini API Key",
-        value=default_key,
-        type="password",
-        help="Enter your Gemini API key securely here."
-    )
-    
-    if user_api_key:
-        genai.configure(api_key=user_api_key)
-    else:
-        st.warning("Please enter a valid Gemini API Key.")
+# 1. Server-side secrets check (Users cannot see this)
+if "GEMINI_API_KEY" in st.secrets and st.secrets["GEMINI_API_KEY"]:
+    active_key = st.secrets["GEMINI_API_KEY"]
+    genai.configure(api_key=active_key)
+    api_key_configured = True
+else:
+    # 2. Agar secrets configure na ho, tabhi manual input mangega (Default Empty)
+    with st.sidebar:
+        st.markdown("### 🔑 API Configuration")
+        user_entered_key = st.text_input(
+            "Gemini API Key",
+            value="",
+            type="password",
+            help="Enter your Gemini API key here."
+        )
+        if user_entered_key:
+            genai.configure(api_key=user_entered_key)
+            api_key_configured = True
+        else:
+            st.warning("Please configure your Gemini API Key in Secrets or enter it above.")
 
 # --- Custom Styling ---
 st.markdown(
@@ -201,7 +207,7 @@ def clear_db():
 
 # --- Refine Prompt Function ---
 def refine_prompt_text(instruction_type):
-    if not user_api_key:
+    if not api_key_configured:
         st.error("API Key configure nahi hai.")
         return
     if st.session_state.current_prompt:
@@ -225,7 +231,6 @@ def refine_prompt_text(instruction_type):
 
 # --- Sidebar UI ---
 with st.sidebar:
-    st.markdown("---")
     st.markdown("### 📜 Prompts Manager")
     tab_hist, tab_fav, tab_export = st.tabs(["🕒 History", "⭐ Favorites", "📥 Export"])
     
@@ -365,8 +370,8 @@ Format:
 """
 
 if generate_btn:
-    if not user_api_key:
-        st.error("⚠️ Sidebar mein valid Gemini API key daaliye.")
+    if not api_key_configured:
+        st.error("⚠️ Gemini API key configure nahi hai.")
     elif user_problem.strip():
         with st.spinner(f"Crafting master prompt in {output_language}..."):
             try:
