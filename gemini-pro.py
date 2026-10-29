@@ -16,16 +16,20 @@ def get_active_model():
             m.name for m in genai.list_models() 
             if "generateContent" in m.supported_generation_methods
         ]
-        # Prefer fast flash models first
+        # 1. Prioritize gemini-3.8-flash
         for name in available_models:
-            if "flash" in name.lower():
+            if "3.8-flash" in name:
                 return genai.GenerativeModel(name)
-        # Fallback to any supported model
+        # 2. Pick any other active flash model (ignoring deprecated 2.5)
+        for name in available_models:
+            if "flash" in name.lower() and "2.5" not in name:
+                return genai.GenerativeModel(name)
+        # 3. Fallback to any supported model in list
         if available_models:
             return genai.GenerativeModel(available_models[0])
     except Exception:
         pass
-    return genai.GenerativeModel("gemini-1.5-flash")
+    return genai.GenerativeModel("models/gemini-3.8-flash")
 
 # --- Database Setup (SQLite Integration) ---
 @st.cache_resource
