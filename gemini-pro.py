@@ -8,6 +8,25 @@ import json
 # --- Streamlit UI Setup ---
 st.set_page_config(page_title="Best Prompt Generator", page_icon="🚀", layout="wide")
 
+# --- Helper: Dynamic Working Model Selector ---
+def get_active_model():
+    """Automatically selects the best available generative model for the API key."""
+    try:
+        available_models = [
+            m.name for m in genai.list_models() 
+            if "generateContent" in m.supported_generation_methods
+        ]
+        # Prefer fast flash models first
+        for name in available_models:
+            if "flash" in name.lower():
+                return genai.GenerativeModel(name)
+        # Fallback to any supported model
+        if available_models:
+            return genai.GenerativeModel(available_models[0])
+    except Exception:
+        pass
+    return genai.GenerativeModel("gemini-1.5-flash")
+
 # --- Database Setup (SQLite Integration) ---
 @st.cache_resource
 def init_db():
@@ -52,7 +71,6 @@ def set_template(text):
 with st.sidebar:
     st.markdown("### 🔑 API Configuration")
     
-    # Secrets se key fetch karega, agar nahi mila toh empty string
     default_key = ""
     try:
         if "GEMINI_API_KEY" in st.secrets:
@@ -193,7 +211,7 @@ def refine_prompt_text(instruction_type):
             refinement_query = f"{modifier}\n\nOriginal Prompt:\n{st.session_state.current_prompt}"
             
             try:
-                model = genai.GenerativeModel("models/gemini-1.5-flash")
+                model = get_active_model()
                 response = model.generate_content(refinement_query)
                 st.session_state.current_prompt = response.text.strip()
                 if st.session_state.current_prompt_id:
@@ -350,7 +368,7 @@ if generate_btn:
             try:
                 full_prompt = f"{SYSTEM_PROMPT}\n\nUser Request:\n{user_problem}"
                 
-                model = genai.GenerativeModel("models/gemini-1.5-flash")
+                model = get_active_model()
                 response = model.generate_content(
                     full_prompt,
                     generation_config={"temperature": creativity_level}
