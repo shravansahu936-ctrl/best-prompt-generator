@@ -8,6 +8,41 @@ import json
 # --- Streamlit UI Setup ---
 st.set_page_config(page_title="Best Prompt Generator", page_icon="🚀", layout="wide")
 
+# --- Helper: Dynamic Working Model Selector ---
+def get_active_model():
+    """Automatically selects the recommended gemini-3.8-flash model."""
+    target_fallback = "gemini-3.8-flash"
+    try:
+        available_models = [
+            m.name for m in genai.list_models() 
+            if "generateContent" in m.supported_generation_methods
+        ]
+        
+        # Priority sequence based on Google's model recommendations
+        candidates = [
+            "gemini-3.8-flash",
+            "models/gemini-3.8-flash",
+            "gemini-2.0-flash",
+            "gemini-1.5-flash-latest"
+        ]
+        
+        for cand in candidates:
+            for m_name in available_models:
+                # Ignore deprecated versions
+                if "2.5" in m_name:
+                    continue
+                if cand in m_name or m_name.endswith(cand):
+                    return genai.GenerativeModel(m_name)
+                    
+        # Fallback to any active model that is not 2.5
+        valid_models = [m for m in available_models if "2.5" not in m]
+        if valid_models:
+            return genai.GenerativeModel(valid_models[0])
+    except Exception:
+        pass
+        
+    return genai.GenerativeModel(target_fallback)
+
 # --- Database Setup (SQLite Integration) ---
 @st.cache_resource
 def init_db():
@@ -36,34 +71,6 @@ def init_db():
     return conn
 
 conn = init_db()
-
-# --- Helper: Dynamic Working Model Selector ---
-def get_active_model():
-    """Automatically selects the best available generative model for the API key."""
-    try:
-        available_models = [
-            m.name for m in genai.list_models() 
-            if "generateContent" in m.supported_generation_methods
-        ]
-        
-        # Priority order for models
-        candidate_names = [
-            "gemini-1.5-flash-latest",
-            "gemini-1.5-flash",
-            "gemini-2.0-flash",
-            "gemini-1.5-pro-latest"
-        ]
-        
-        for candidate in candidate_names:
-            for m_name in available_models:
-                if candidate in m_name or m_name.endswith(candidate):
-                    return genai.GenerativeModel(m_name)
-                    
-        if available_models:
-            return genai.GenerativeModel(available_models[0])
-    except Exception:
-        pass
-    return genai.GenerativeModel("gemini-1.5-flash-latest")
 
 # --- Session States ---
 if "user_text" not in st.session_state:
