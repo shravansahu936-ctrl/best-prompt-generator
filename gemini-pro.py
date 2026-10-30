@@ -1,6 +1,7 @@
 import streamlit as st
 import google.generativeai as genai
 from st_copy_button import st_copy_button
+from streamlit_mic_recorder import speech_to_text
 import sqlite3
 import pandas as pd
 import json
@@ -18,7 +19,6 @@ def get_active_model():
             if "generateContent" in m.supported_generation_methods
         ]
         
-        # Priority sequence based on Google's model recommendations
         candidates = [
             "gemini-3.8-flash",
             "models/gemini-3.8-flash",
@@ -28,13 +28,11 @@ def get_active_model():
         
         for cand in candidates:
             for m_name in available_models:
-                # Ignore deprecated versions
                 if "2.5" in m_name:
                     continue
                 if cand in m_name or m_name.endswith(cand):
                     return genai.GenerativeModel(m_name)
                     
-        # Fallback to any active model that is not 2.5
         valid_models = [m for m in available_models if "2.5" not in m]
         if valid_models:
             return genai.GenerativeModel(valid_models[0])
@@ -75,10 +73,14 @@ conn = init_db()
 # --- Session States ---
 if "user_text" not in st.session_state:
     st.session_state.user_text = ""
-if "current_prompt" not in st.session_state:
-    st.session_state.current_prompt = ""
+if "prompts_variations" not in st.session_state:
+    st.session_state.prompts_variations = {}
+if "selected_variation_key" not in st.session_state:
+    st.session_state.selected_variation_key = "Option A"
 if "current_prompt_id" not in st.session_state:
     st.session_state.current_prompt_id = None
+if "test_output" not in st.session_state:
+    st.session_state.test_output = ""
 
 def set_template(text):
     st.session_state.user_text = text
@@ -86,13 +88,11 @@ def set_template(text):
 # --- Secure API Configuration (No Key Exposure) ---
 api_key_configured = False
 
-# 1. Server-side secrets check (Users cannot see this)
 if "GEMINI_API_KEY" in st.secrets and st.secrets["GEMINI_API_KEY"]:
     active_key = st.secrets["GEMINI_API_KEY"]
     genai.configure(api_key=active_key)
     api_key_configured = True
 else:
-    # 2. Agar secrets configure na ho, tabhi manual input mangega (Default Empty)
     with st.sidebar:
         st.markdown("### 🔑 API Configuration")
         user_entered_key = st.text_input(
@@ -152,7 +152,7 @@ st.markdown(
     .stButton>button {
         border-radius: 10px;
         height: 52px;
-        font-size: 1.25rem;
+        font-size: 1.1rem;
         font-weight: bold;
         background: linear-gradient(90deg, #0284c7, #8b5cf6, #0ea5e9);
         border: none;
@@ -213,28 +213,67 @@ def clear_db():
         conn.execute("DELETE FROM prompts")
 
 # --- Refine Prompt Function ---
-def refine_prompt_text(instruction_type):
+def refine_prompt_text(instruction_type, target_key):
     if not api_key_configured:
         st.error("API Key configure nahi hai.")
         return
-    if st.session_state.current_prompt:
-        with st.spinner(f"Refining prompt ({instruction_type})..."):
+    current_text = st.session_state.prompts_variations.get(target_key, "")
+    if current_text:
+        with st.spinner(f"Refining ({target_key} - {instruction_type})..."):
             modifier = {
                 "shorter": "Make this prompt much more concise while retaining critical constraints.",
                 "detailed": "Expand this prompt by adding deeper domain details and structural expectations.",
                 "professional": "Elevate this prompt tone to be exceptionally professional and authoritative."
             }.get(instruction_type, "")
             
-            refinement_query = f"{modifier}\n\nOriginal Prompt:\n{st.session_state.current_prompt}"
+            refinement_query = f"{modifier}\n\nOriginal Prompt:\n{current_text}"
             
             try:
                 model = get_active_model()
                 response = model.generate_content(refinement_query)
-                st.session_state.current_prompt = response.text.strip()
+                refined = response.text.strip()
+                st.session_state.prompts_variations[target_key] = refined
+                st.session_state.test_output = ""
                 if st.session_state.current_prompt_id:
-                    update_prompt_text_in_db(st.session_state.current_prompt_id, st.session_state.current_prompt)
+                    update_prompt_text_in_db(st.session_state.current_prompt_id, refined)
             except Exception as e:
                 st.error(f"Refinement error: {e}")
+
+# --- Test Run Generated Prompt ---
+def test_run_prompt(prompt_to_run):
+    if not api_key_configured:
+        st.error("API Key configure nahi hai.")
+        return
+    if prompt_to_run:
+        with st.spinner("⚡ Running prompt through Gemini to get AI answer..."):
+            try:
+                model = get_active_model()
+                response = model.generate_content(prompt_to_run)
+                st.session_state.test_output = response.text.strip()
+            except Exception as e:
+                st.error(f"Execution Error: {e}")
+
+# --- Helper: Split Multi-Variation Output ---
+def parse_variations(raw_text):
+    variations = {
+        "Option A (Concise & Direct)": "",
+        "Option B (Persona & Framework)": "",
+        "Option C (Few-Shot / Examples)": ""
+    }
+    parts_a = raw_text.split("===OPTION_A===")
+    if len(parts_a) > 1:
+        parts_b = parts_a[1].split("===OPTION_B===")
+        variations["Option A (Concise & Direct)"] = parts_b[0].strip()
+        if len(parts_b) > 1:
+            parts_c = parts_b[1].split("===OPTION_C===")
+            variations["Option B (Persona & Framework)"] = parts_c[0].strip()
+            if len(parts_c) > 1:
+                variations["Option C (Few-Shot / Examples)"] = parts_c[1].strip()
+    else:
+        variations["Option A (Concise & Direct)"] = raw_text.strip()
+        variations["Option B (Persona & Framework)"] = raw_text.strip()
+        variations["Option C (Few-Shot / Examples)"] = raw_text.strip()
+    return variations
 
 # --- Sidebar UI ---
 with st.sidebar:
@@ -290,8 +329,9 @@ with st.sidebar:
     st.divider()
     if st.button("🗑️ Clear Database History", use_container_width=True):
         clear_db()
-        st.session_state.current_prompt = ""
+        st.session_state.prompts_variations = {}
         st.session_state.current_prompt_id = None
+        st.session_state.test_output = ""
         st.rerun()
 
 # --- Main Layout ---
@@ -328,13 +368,34 @@ with col1:
 
 with col2:
     st.markdown("### 📝 Your Problem / Idea")
+    
+    # --- Voice Input & Text Area Integration ---
+    voice_col, info_col = st.columns([1, 3])
+    with voice_col:
+        # Voice to text input (supports Hindi, English, Hinglish)
+        audio_text = speech_to_text(
+            language='en-IN',
+            start_prompt="🎙️ Speak Idea",
+            stop_prompt="⏹️ Stop Recording",
+            key='voice_recorder'
+        )
+        if audio_text:
+            st.session_state.user_text = audio_text
+            st.rerun()
+            
+    with info_col:
+        st.caption("🎙️ Mic click karke bolen ya neeche type karein.")
+
     user_problem = st.text_area(
         "Label hidden",
+        value=st.session_state.user_text,
         placeholder="E.g., Mujhe kal ek presentation deni hai cost accounting pe, points samajh nahi aa rahe...",
         height=140,
         label_visibility="collapsed",
-        key="user_text"
+        key="user_text_input"
     )
+    # Sync manual typing back to state
+    st.session_state.user_text = user_problem
     
     st.caption("✨ Try a quick example:")
     t_col1, t_col2, t_col3 = st.columns(3)
@@ -346,41 +407,38 @@ with col2:
         st.button("🎬 YT Script", on_click=set_template, args=("Ek 5-minute ki YouTube video banani hai 'Top 5 Budget Smartphones in 2026' par. Catchy script structure chahiye.",), use_container_width=True)
     
     st.markdown("<br>", unsafe_allow_html=True)
-    generate_btn = st.button("✨ Generate Master Prompt", type="primary", use_container_width=True)
+    generate_btn = st.button("✨ Generate 3 Master Prompt Variations", type="primary", use_container_width=True)
 
 SYSTEM_PROMPT = f"""
-You are an Expert AI Prompt Engineer. Transform this raw request into a structured master prompt.
+You are an Expert AI Prompt Engineer. Transform the user's raw request into 3 distinct, high-quality prompt variations.
 
 Target Configuration:
-- Category: 
-{mode}
-- Target AI Model: 
-{target_model}
-- Desired Tone: 
-{tone}
-- Desired Output Format: 
-{output_format}
-- Language: 
-{output_language}
+- Category: {mode}
+- Target AI Model: {target_model}
+- Desired Tone: {tone}
+- Desired Output Format: {output_format}
+- Language: {output_language}
 
 CRITICAL RULES:
-1. Do NOT solve the user's problem directly. ONLY write the prompt the user should copy/paste.
-2. The prompt MUST be written entirely in {output_language}.
+1. Do NOT solve the user's request directly. ONLY generate prompts ready for copy/pasting into an AI.
+2. The entire output MUST be written in {output_language}.
+3. You MUST format the response strictly with these exact separator delimiters:
 
-Format:
-**Role:** [Expert role for {mode}]
-**Context:** [Problem description translated to {output_language}]
-**Task:** [Direct instruction]
-**Tone & Style:** [Adhere to {tone} and format as {output_format}]
-**Guidelines:** [3-4 strict rules]
-**Output Format:** [{output_format}]
+===OPTION_A===
+[Generate Option A: Concise & Direct - Short, compact, task-focused prompt with minimal fluff]
+
+===OPTION_B===
+[Generate Option B: Persona & Framework-Based - Uses Role, Context, Task, Tone, Guidelines, and Format structure]
+
+===OPTION_C===
+[Generate Option C: Few-Shot / Examples - Includes precise task context plus 1-2 realistic input/output examples demonstrating the desired response structure]
 """
 
 if generate_btn:
     if not api_key_configured:
         st.error("⚠️ Gemini API key configure nahi hai.")
     elif user_problem.strip():
-        with st.spinner(f"Crafting master prompt in {output_language}..."):
+        with st.spinner(f"Crafting 3 master variations in {output_language}..."):
             try:
                 full_prompt = f"{SYSTEM_PROMPT}\n\nUser Request:\n{user_problem}"
                 
@@ -391,10 +449,14 @@ if generate_btn:
                 )
                 
                 if response.text:
-                    st.session_state.current_prompt = response.text.strip()
+                    variations = parse_variations(response.text)
+                    st.session_state.prompts_variations = variations
+                    st.session_state.test_output = ""
+                    
+                    primary_prompt = variations.get("Option B (Persona & Framework)") or list(variations.values())[0]
                     new_item = {
                         "query": user_problem,
-                        "prompt": st.session_state.current_prompt,
+                        "prompt": primary_prompt,
                         "category": mode,
                         "target_model": target_model,
                         "tone": tone,
@@ -412,62 +474,83 @@ if generate_btn:
             except Exception as e:
                 st.error(f"API Error: {e}")
     else:
-        st.warning("⚠️ Text box mein problem likhein.")
+        st.warning("⚠️ Text box mein problem likhein ya voice se bole.")
 
-if st.session_state.current_prompt:
+# --- Multi-Variation Display Section ---
+if st.session_state.prompts_variations:
     st.divider()
-    st.markdown("### 🎯 Your Optimized Master Prompt")
+    st.markdown("### 🎯 Generated Master Prompt Variations (A/B Options)")
     
-    words_count = len(st.session_state.current_prompt.split())
-    tokens_count = int(len(st.session_state.current_prompt) / 3.8)
+    tab_titles = list(st.session_state.prompts_variations.keys())
+    tabs = st.tabs(tab_titles)
     
-    m1, m2, _ = st.columns([1, 1, 2])
-    m1.metric("📝 Word Count", words_count)
-    m2.metric("🔢 Est. Tokens", tokens_count)
-    
-    with st.container(border=True):
-        st.markdown(
-            f'<div style="background-color: rgba(15, 23, 42, 0.7); padding: 20px; border-radius: 12px; border: 1px solid rgba(0, 255, 255, 0.4);">{st.session_state.current_prompt}</div>',
-            unsafe_allow_html=True
-        )
+    for idx, tab in enumerate(tabs):
+        opt_key = tab_titles[idx]
+        current_text = st.session_state.prompts_variations[opt_key]
         
-        st.markdown("---")
-        st.markdown("#### ⚡ Quick Prompt Refiner")
-        r1, r2, r3 = st.columns(3)
-        with r1:
-            if st.button("✂️ Make it Shorter", use_container_width=True):
-                refine_prompt_text("shorter")
-                st.rerun()
-        with r2:
-            if st.button("🔍 Add More Details", use_container_width=True):
-                refine_prompt_text("detailed")
-                st.rerun()
-        with r3:
-            if st.button("👔 Make it Professional", use_container_width=True):
-                refine_prompt_text("professional")
-                st.rerun()
-                
-        st.markdown("---")
-        b1, b2, b3 = st.columns(3)
-        with b1:
-            st_copy_button(st.session_state.current_prompt, before_copy_label="📋 Copy Prompt", after_copy_label="✅ Copied!")
-        with b2:
-            st.download_button(
-                label="💾 Download .txt",
-                data=st.session_state.current_prompt,
-                file_name="master_prompt.txt",
-                mime="text/plain",
-                use_container_width=True
-            )
-        with b3:
-            current_id = st.session_state.current_prompt_id
-            cursor = conn.cursor()
-            cursor.execute("SELECT favorite FROM prompts WHERE id = ?", (current_id,))
-            res = cursor.fetchone()
-            is_fav = bool(res[0]) if res else False
+        with tab:
+            words_count = len(current_text.split())
+            tokens_count = int(len(current_text) / 3.8)
             
-            fav_label = "⭐ Remove Favorite" if is_fav else "⭐ Save to Favorites"
-            if st.button(fav_label, use_container_width=True):
-                if current_id:
-                    update_favorite_in_db(current_id, not is_fav)
-                    st.rerun()
+            m1, m2, _ = st.columns([1, 1, 2])
+            m1.metric("📝 Word Count", words_count)
+            m2.metric("🔢 Est. Tokens", tokens_count)
+            
+            with st.container(border=True):
+                st.markdown(
+                    f'<div style="background-color: rgba(15, 23, 42, 0.7); padding: 20px; border-radius: 12px; border: 1px solid rgba(0, 255, 255, 0.4);">{current_text}</div>',
+                    unsafe_allow_html=True
+                )
+                
+                st.markdown("---")
+                st.markdown("#### ⚡ Quick Prompt Refiner")
+                r1, r2, r3 = st.columns(3)
+                with r1:
+                    if st.button("✂️ Make it Shorter", key=f"short_{opt_key}", use_container_width=True):
+                        refine_prompt_text("shorter", opt_key)
+                        st.rerun()
+                with r2:
+                    if st.button("🔍 Add More Details", key=f"det_{opt_key}", use_container_width=True):
+                        refine_prompt_text("detailed", opt_key)
+                        st.rerun()
+                with r3:
+                    if st.button("👔 Make it Professional", key=f"prof_{opt_key}", use_container_width=True):
+                        refine_prompt_text("professional", opt_key)
+                        st.rerun()
+                        
+                st.markdown("---")
+                b1, b2, b3, b4 = st.columns(4)
+                with b1:
+                    st_copy_button(current_text, before_copy_label="📋 Copy Prompt", after_copy_label="✅ Copied!", key=f"copy_{opt_key}")
+                with b2:
+                    st.download_button(
+                        label="💾 Download .txt",
+                        data=current_text,
+                        file_name=f"{opt_key.replace(' ', '_').lower()}.txt",
+                        mime="text/plain",
+                        key=f"dl_{opt_key}",
+                        use_container_width=True
+                    )
+                with b3:
+                    current_id = st.session_state.current_prompt_id
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT favorite FROM prompts WHERE id = ?", (current_id,))
+                    res = cursor.fetchone()
+                    is_fav = bool(res[0]) if res else False
+                    
+                    fav_label = "⭐ Remove Favorite" if is_fav else "⭐ Save to Favorites"
+                    if st.button(fav_label, key=f"fav_{opt_key}", use_container_width=True):
+                        if current_id:
+                            update_favorite_in_db(current_id, not is_fav)
+                            st.rerun()
+                with b4:
+                    if st.button(f"⚡ Test Run ({opt_key.split()[0]} {opt_key.split()[1]})", key=f"test_{opt_key}", use_container_width=True):
+                        test_run_prompt(current_text)
+                        st.rerun()
+
+    # --- Live Output Section from Test Run ---
+    if st.session_state.test_output:
+        st.markdown("### 🤖 Live AI Output (Test Run Result)")
+        with st.container(border=True):
+            st.markdown(st.session_state.test_output)
+            st_copy_button(st.session_state.test_output, before_copy_label="📋 Copy Output", after_copy_label="✅ Output Copied!", key="copy_test_output")
